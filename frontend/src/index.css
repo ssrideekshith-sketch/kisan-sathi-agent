@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+:root {
+  font-family: Inter, "Noto Sans Telugu", "Noto Sans Devanagari", "Noto Sans Tamil", "Noto Sans Malayalam", ui-sans-serif, system-ui, sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #17211b;
+  background: #F6F5EE;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background-color: #F6F5EE; background-image: radial-gradient(circle at 12% 0%, rgba(16, 185, 129, 0.09), transparent 42%), radial-gradient(circle at 88% 4%, rgba(245, 158, 11, 0.09), transparent 38%); background-attachment: fixed; }
+button, input, select, textarea { font: inherit; }
+h1, h2, h3, h4 { font-family: "Plus Jakarta Sans", Inter, sans-serif; }
+:lang(te) { font-family: "Noto Sans Telugu", Inter, sans-serif; }
+:lang(hi) { font-family: "Noto Sans Devanagari", Inter, sans-serif; }
+:lang(ta) { font-family: "Noto Sans Tamil", Inter, sans-serif; }
+:lang(ml) { font-family: "Noto Sans Malayalam", Inter, sans-serif; }
+
+@keyframes fadeSlideUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes pulseRing { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,.42); } 70% { box-shadow: 0 0 0 11px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
+@keyframes shimmerSweep { 0% { transform: translateX(-130%) skewX(-18deg); } 100% { transform: translateX(230%) skewX(-18deg); } }
+.animate-fade-slide-up { animation: fadeSlideUp .48s cubic-bezier(.2,.75,.25,1) both; }
+.animate-pulse-ring { animation: pulseRing 1.8s ease-out infinite; }
+.animate-shimmer-sweep { position: relative; isolation: isolate; overflow: hidden; }
+.animate-shimmer-sweep::after { content: ""; position: absolute; z-index: 0; pointer-events: none; inset: 0 auto 0 -25%; width: 35%; background: linear-gradient(90deg,transparent,rgba(255,255,255,.2),transparent); animation: shimmerSweep 3s ease-in-out infinite; }
+.glass-panel { border: 1px solid rgba(231,229,228,.82); background: rgba(255,255,255,.9); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); box-shadow: 0 14px 40px -14px rgba(4,57,39,.14); }
+.agri-page { animation: fadeSlideUp .42s ease-out both; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; } }

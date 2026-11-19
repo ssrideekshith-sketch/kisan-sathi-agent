@@ -1,0 +1,44 @@
+[
+  {
+    "id": "neem-coated-urea-45kg",
+    "name": "Neem Coated Urea",
+    "bag_weight_kg": 45,
+    "mrp_inr": 266.5,
+    "category": "Urea"
+  },
+  {
+    "id": "urea-gold-sulphur-coated-40kg",
+    "name": "Urea Gold / Sulphur Coated Urea",
+    "bag_weight_kg": 40,
+    "mrp_inr": 266.5,
+    "category": "Urea"
+  },
+  {
+    "id": "dap-18-46-0-50kg",
+    "name": "DAP 18-46-0",
+    "bag_weight_kg": 50,
+    "mrp_inr": 1350.0,
+    "category": "Phosphatic Fertilizer"
+  },
+  {
+    "id": "mop-muriate-of-potash-50kg",
+    "name": "MOP Muriate of Potash",
+    "bag_weight_kg": 50,
+    "mrp_inr": 1710.54,
+    "category": "Potassic Fertilizer"
+  },
+  {
+    "id": "npk-10-26-26-50kg",
+    "name": "NPK 10-26-26",
+    "bag_weight_kg": 50,
+    "mrp_inr": 1814.82,
+    "category": "NPK Complex Fertilizer"
+  },
+  {
+    "id": "npk-12-32-16-50kg",
+    "name": "NPK 12-32-16",
+    "bag_weight_kg": 50,
+    "mrp_inr": 1711.87,
+    "category": "NPK Complex Fertilizer"
+  }
+]
