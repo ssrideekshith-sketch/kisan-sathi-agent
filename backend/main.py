@@ -1,4 +1,4 @@
-"""FastAPI service for fertilizer MRP checks and farmer complaints."""
+"""FastAPI service for central fertilizer MRP checks, booking agent, and farmer complaints."""
 
 import asyncio
 import copy
@@ -30,6 +30,7 @@ MRP_FILE = BASE_DIR / "mrp_data.json"
 COMPLAINTS_FILE = BASE_DIR / "complaints.json"
 FARMERS_FILE = BASE_DIR / "farmers.json"
 
+load_dotenv(BASE_DIR / ".env")
 load_dotenv()
 
 
@@ -46,11 +47,21 @@ def load_mrps() -> list[dict]:
 
 mrp_data = load_mrps()
 
-app = FastAPI(title="Telangana Fertilizer Price Verification API")
+
+def get_allowed_origins() -> list[str]:
+    raw_origins = os.getenv("ALLOWED_ORIGINS", "").strip()
+    if not raw_origins or raw_origins == "*":
+        return ["*"]
+    return [origin.strip().rstrip("/") for origin in raw_origins.split(",") if origin.strip()]
+
+
+allowed_origins = get_allowed_origins()
+
+app = FastAPI(title="Central Fertilizer Price Verification & Booking API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials=allowed_origins != ["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -101,15 +112,15 @@ class FarmerRegistration(BaseModel):
 
 
 class AgentBookingIntent(BaseModel):
-    shop_keyword: str = "Shadnagar"
+    shop_keyword: str = "Central Fertilizer Depot"
     bags: int = Field(default=1, ge=1, le=5)
-    fertilizer_type: str = "Urea"
+    fertilizer_type: str = "Subsidized Fertilizer"
     shop_explicit: bool = False
 
 
 class AgentBookingRequest(BaseModel):
     message: str
-    ppb_number: str = "T05060123456"
+    ppb_number: str = "IND-PPB-2026-0001"
     otp: str = "1234"
     language: str = "en"
 
@@ -132,17 +143,23 @@ AGENT_JOBS: dict[str, dict] = {}
 AGENT_JOBS_LOCK = threading.Lock()
 AGENT_TASKS: dict[str, asyncio.Task] = {}
 FARMERS_LOCK = threading.Lock()
+COMPLAINTS_LOCK = threading.Lock()
 
 
-def normalize_language(language: str) -> str:
-    return language if language in SUPPORTED_LANGUAGES else "en"
+def normalize_language(language: Optional[str]) -> str:
+    cleaned = (language or "en").strip().lower()
+    return cleaned if cleaned in SUPPORTED_LANGUAGES else "en"
 
 
 def finalize_price_result(result: PriceCheckResult, quoted_price: Optional[float]) -> PriceCheckResult:
     """Enforce arithmetic and use the JSON file as the source of statutory MRPs."""
-    result.quoted_price = float(quoted_price if quoted_price is not None else result.quoted_price or 0)
+    result.quoted_price = float(quoted_price if quoted_price is not None else (result.quoted_price or 0.0))
     listed_item = next(
-        (item for item in mrp_data if str(item.get("id", "")).casefold() == result.matched_mrp_id.strip().casefold()),
+        (
+            item
+            for item in mrp_data
+            if str(item.get("id", "")).strip().casefold() == result.matched_mrp_id.strip().casefold()
+        ),
         None,
     )
     if listed_item is not None and result.mrp_status != "market_estimate":
@@ -151,9 +168,9 @@ def finalize_price_result(result: PriceCheckResult, quoted_price: Optional[float
     else:
         result.mrp_status = "market_estimate"
         result.matched_mrp_id = "MARKET-ESTIMATE"
-        result.official_mrp = max(float(result.official_mrp), 0)
-    result.overcharge_amount = max(result.quoted_price - result.official_mrp, 0)
-    result.is_overcharged = result.quoted_price > result.official_mrp if result.quoted_price > 0 else False
+        result.official_mrp = max(float(result.official_mrp or 0.0), 0.0)
+    result.overcharge_amount = max(round(result.quoted_price - result.official_mrp, 2), 0.0)
+    result.is_overcharged = bool(result.quoted_price > result.official_mrp) if result.quoted_price > 0 else False
     return result
 
 
@@ -189,10 +206,16 @@ def write_farmers_unlocked(records: dict[str, dict]) -> None:
 
 def find_farmer(identifier: str) -> Optional[dict]:
     key = identifier.strip().casefold()
+    if not key:
+        return None
     with FARMERS_LOCK:
         farmers = read_farmers_unlocked()
         for ppb, profile in farmers.items():
-            if ppb.casefold() == key or str(profile.get("ppb_number", "")).casefold() == key or str(profile.get("mobile", "")).casefold() == key:
+            if (
+                ppb.casefold() == key
+                or str(profile.get("ppb_number", "")).casefold() == key
+                or str(profile.get("mobile", "")).casefold() == key
+            ):
                 return copy.deepcopy(profile)
     return None
 
@@ -201,28 +224,36 @@ def save_booking_for_farmer(ppb_number: str, intent: AgentBookingIntent, booking
     if booking_result.get("status") != "success":
         return None
     receipt_text = str(booking_result.get("receipt_text", ""))
-    booking_match = re.search(r"FFS-TS-2026-\d{4}", receipt_text)
-    booking_id = booking_match.group(0) if booking_match else f"FFS-TS-2026-{secrets.randbelow(10000):04d}"
+    booking_match = re.search(r"FFS-(?:IN|TS)-2026-\d{4}", receipt_text)
+    booking_id = booking_match.group(0) if booking_match else f"FFS-IN-2026-{secrets.randbelow(10000):04d}"
     with FARMERS_LOCK:
         farmers = read_farmers_unlocked()
+        normalized_ppb = ppb_number.strip().casefold()
         farmer_key = next(
-            (key for key, value in farmers.items() if key.casefold() == ppb_number.strip().casefold() or str(value.get("ppb_number", "")).casefold() == ppb_number.strip().casefold() or str(value.get("mobile", "")).casefold() == ppb_number.strip().casefold()),
+            (
+                key
+                for key, value in farmers.items()
+                if key.casefold() == normalized_ppb
+                or str(value.get("ppb_number", "")).casefold() == normalized_ppb
+                or str(value.get("mobile", "")).casefold() == normalized_ppb
+            ),
             None,
         )
         if farmer_key is None:
             return None
         profile = farmers[farmer_key]
-        shop_selected = booking_result.get("shop_selected", "")
-        shop_name = shop_selected.split(" - ", 1)[0].strip()
+        shop_selected = str(booking_result.get("shop_selected", "")).strip()
+        shop_name = shop_selected.split(" - ", 1)[0].strip() or intent.shop_keyword or profile.get("preferred_shop") or profile.get("mandal", "")
         shop_mandals = {
             "Shadnagar Agro Kendra": "Shadnagar",
             "Chevella Rythu Seva": "Chevella",
             "Maheshwaram Agri Depot": "Maheshwaram",
         }
-        qr_payload = f"{booking_id} | {profile.get('ppb_number', ppb_number)} | {shop_name} | {intent.bags}"
+        resolved_product = str(booking_result.get("fertilizer_type") or intent.fertilizer_type or "Subsidized Fertilizer").strip()
+        qr_payload = f"{booking_id} | {profile.get('ppb_number', ppb_number)} | {resolved_product} | {shop_name} | {intent.bags}"
         record = {
             "booking_id": booking_id,
-            "fertilizer_type": intent.fertilizer_type,
+            "fertilizer_type": resolved_product,
             "bags": intent.bags,
             "shop_selected": shop_name,
             "mandal": shop_mandals.get(shop_name, intent.shop_keyword or profile.get("mandal", "")),
@@ -236,9 +267,9 @@ def save_booking_for_farmer(ppb_number: str, intent: AgentBookingIntent, booking
         return copy.deepcopy(record)
 
 
-def generate_booking_confirmation(client, booking_result: dict, intent: AgentBookingIntent, language: str) -> LocalizedConfirmation:
+def build_confirmation_prompt(booking_result: dict, intent: AgentBookingIntent, language: str) -> str:
     booking_summary = json.dumps(booking_result, ensure_ascii=False)
-    confirmation_prompt = (
+    return (
         "Write short, friendly booking status messages. Provide message_en in English, "
         "message_te in simple Telugu, and message_localized in "
         f"{LANGUAGE_NAMES[language]} (language code {language}). Mention {intent.bags} "
@@ -247,6 +278,28 @@ def generate_booking_confirmation(client, booking_result: dict, intent: AgentBoo
         "If it failed, clearly and politely say it could not be completed. Do not claim success "
         f"unless the status is success. Booking result: {booking_summary}"
     )
+
+
+def fallback_confirmation(booking_result: dict, language: str) -> LocalizedConfirmation:
+    succeeded = booking_result.get("status") == "success"
+    english_fallback = "Your booking is confirmed." if succeeded else "Booking could not be completed. Please try again."
+    telugu_fallback = "బుకింగ్ విజయవంతమైంది." if succeeded else "బుకింగ్ పూర్తి కాలేదు. మళ్లీ ప్రయత్నించండి."
+    localized_fallbacks = {
+        "en": english_fallback,
+        "te": telugu_fallback,
+        "hi": "आपकी बुकिंग सफल हुई।" if succeeded else "बुकिंग पूरी नहीं हो सकी। फिर से कोशिश करें।",
+        "ta": "முன்பதிவு வெற்றிகரமாக முடிந்தது." if succeeded else "முன்பதிவை முடிக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.",
+        "ml": "ബുക്കിംഗ് വിജയകരമായി പൂർത്തിയായി." if succeeded else "ബുക്കിംഗ് പൂർത്തിയാക്കാനായില്ല. വീണ്ടും ശ്രമിക്കുക.",
+    }
+    return LocalizedConfirmation(
+        message_en=english_fallback,
+        message_te=telugu_fallback,
+        message_localized=localized_fallbacks[language],
+    )
+
+
+def generate_booking_confirmation(client, booking_result: dict, intent: AgentBookingIntent, language: str) -> LocalizedConfirmation:
+    confirmation_prompt = build_confirmation_prompt(booking_result, intent, language)
     try:
         response = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -257,26 +310,16 @@ def generate_booking_confirmation(client, booking_result: dict, intent: AgentBoo
             ),
         )
         if response.parsed is not None:
-            return response.parsed if isinstance(response.parsed, LocalizedConfirmation) else LocalizedConfirmation.model_validate(response.parsed)
+            return (
+                response.parsed
+                if isinstance(response.parsed, LocalizedConfirmation)
+                else LocalizedConfirmation.model_validate(response.parsed)
+            )
         if response.text:
             return LocalizedConfirmation.model_validate_json(response.text)
         raise ValueError("Gemini returned an empty confirmation")
     except Exception:
-        succeeded = booking_result.get("status") == "success"
-        english_fallback = "Your booking is confirmed." if succeeded else "Booking could not be completed. Please try again."
-        telugu_fallback = "బుకింగ్ విజయవంతమైంది." if succeeded else "బుకింగ్ పూర్తి కాలేదు. మళ్లీ ప్రయత్నించండి."
-        localized_fallbacks = {
-            "en": english_fallback,
-            "te": telugu_fallback,
-            "hi": "आपकी बुकिंग सफल हुई।" if succeeded else "बुकिंग पूरी नहीं हो सकी। फिर से कोशिश करें।",
-            "ta": "முன்பதிவு வெற்றிகரமாக முடிந்தது." if succeeded else "முன்பதிவை முடிக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.",
-            "ml": "ബുക്കിംഗ് വിജയകരമായി പൂർത്തിയായി." if succeeded else "ബുക്കിംഗ് പൂർത്തിയാക്കാനായില്ല. വീണ്ടും ശ്രമിക്കുക.",
-        }
-        return LocalizedConfirmation(
-            message_en=english_fallback,
-            message_te=telugu_fallback,
-            message_localized=localized_fallbacks[language],
-        )
+        return fallback_confirmation(booking_result, language)
 
 
 async def run_agent_job(job_id: str, client, request: AgentBookingRequest, intent: AgentBookingIntent, language: str) -> None:
@@ -309,9 +352,10 @@ async def run_agent_job(job_id: str, client, request: AgentBookingRequest, inten
             "confirmation_localized": confirmation.message_localized,
         }
         with AGENT_JOBS_LOCK:
-            job = AGENT_JOBS[job_id]
-            job.update(status=booking_result.get("status", "error"), result=result)
-            job["current_step"] = "completed" if booking_result.get("status") == "success" else "failed"
+            job = AGENT_JOBS.get(job_id)
+            if job is not None:
+                job.update(status=booking_result.get("status", "error"), result=result)
+                job["current_step"] = "completed" if booking_result.get("status") == "success" else "failed"
     except Exception as exc:
         with AGENT_JOBS_LOCK:
             job = AGENT_JOBS.get(job_id)
@@ -325,6 +369,11 @@ def snapshot_agent_job(job_id: str) -> Optional[dict]:
         if job is None:
             return None
         return {**job, "steps": list(job.get("steps", []))}
+
+
+@app.get("/health")
+def health_check() -> dict:
+    return {"status": "ok", "service": "KisanSathi AI Central Backend"}
 
 
 @app.get("/mrps")
@@ -350,14 +399,19 @@ def register_farmer(request: FarmerRegistration) -> dict:
         requested_ppb = profile["ppb_number"].casefold()
         requested_mobile = profile["mobile"].casefold()
         ppb_owner = next(
-            (key for key, saved in farmers.items()
-             if key.casefold() == requested_ppb
-             or str(saved.get("ppb_number", "")).casefold() == requested_ppb),
+            (
+                key
+                for key, saved in farmers.items()
+                if key.casefold() == requested_ppb or str(saved.get("ppb_number", "")).casefold() == requested_ppb
+            ),
             None,
         )
         mobile_owner = next(
-            (key for key, saved in farmers.items()
-             if str(saved.get("mobile", "")).casefold() == requested_mobile),
+            (
+                key
+                for key, saved in farmers.items()
+                if str(saved.get("mobile", "")).casefold() == requested_mobile
+            ),
             None,
         )
         if ppb_owner and mobile_owner and ppb_owner != mobile_owner:
@@ -386,7 +440,8 @@ def get_farmer(identifier: str) -> dict:
 
 @app.post("/agent-book")
 async def agent_book(request: AgentBookingRequest, live: bool = Query(False)) -> dict:
-    if not os.getenv("GEMINI_API_KEY"):
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured.")
 
     language = normalize_language(request.language)
@@ -394,24 +449,24 @@ async def agent_book(request: AgentBookingRequest, live: bool = Query(False)) ->
     profile_shop = (
         (farmer_profile or {}).get("preferred_shop")
         or (farmer_profile or {}).get("mandal")
-        or "Shadnagar"
+        or "Central Fertilizer Depot"
     )
     prompt = (
         "Extract the farmer's preferred fertilizer shop, village, or mandal and the "
-        "number of bags and the exact fertilizer product/grade from the message. Support centrally "
-        "subsidized or monitored products including Urea, DAP, MOP, SSP, NPK grades (preserve "
-        "the grade), Ammonium Sulphate, TSP, and MAP. Never replace a requested product with Urea. "
-        "Use fertilizer_type='Urea' only when no fertilizer is stated, and bags=1 when no quantity "
-        "is stated. Set shop_explicit=true only if the farmer's message "
-        "names a shop, mandal, or location; otherwise set it to false. Return only the "
-        "requested structured fields.\n"
+        "number of bags and the exact fertilizer product/grade from the message. Support all "
+        "central government subsidized or monitored fertilizer products including Urea, DAP, MOP, "
+        "SSP, NPK complex grades (preserve the exact grade), Ammonium Sulphate, TSP, and MAP. "
+        "Never replace a requested product with Urea. Use fertilizer_type='Subsidized Fertilizer' "
+        "only when no specific fertilizer is stated, and bags=1 when no quantity is stated. "
+        "Set shop_explicit=true only if the farmer's message names a shop, mandal, or location; "
+        "otherwise set it to false. Return only the requested structured fields.\n"
         f"Registered farmer preferred shop/mandal: {profile_shop}. Use this as the default "
         "when the message does not explicitly request another location.\n\n"
         f"Farmer message: {request.message}\n"
         f"The booking confirmation should be written in {LANGUAGE_NAMES[language]} (language code {language})."
     )
     try:
-        client = genai.Client(http_options={"api_version": "v1beta"})
+        client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt,
@@ -464,58 +519,14 @@ async def agent_book(request: AgentBookingRequest, live: bool = Query(False)) ->
     )
     booking_result.setdefault("fertilizer_type", intent.fertilizer_type)
     booking_record = save_booking_for_farmer(request.ppb_number, intent, booking_result)
-    booking_summary = json.dumps(booking_result, ensure_ascii=False)
-    confirmation_prompt = (
-        "Write short, friendly booking status messages. Provide message_en in English, "
-        "message_te in simple Telugu, and message_localized in "
-        f"{LANGUAGE_NAMES[language]} (language code {language}). Mention {intent.bags} "
-        f"bag(s) of {intent.fertilizer_type}. "
-        "If the browser booking succeeded, say it is confirmed and include the selected shop. "
-        "If it failed, clearly and politely say it could not be completed. Do not claim success "
-        f"unless the status is success. Booking result: {booking_summary}"
-    )
-    try:
-        confirmation_response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=confirmation_prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=LocalizedConfirmation,
-            ),
-        )
-        if confirmation_response.parsed is not None:
-            parsed_confirmation = confirmation_response.parsed
-            confirmation = parsed_confirmation if isinstance(parsed_confirmation, LocalizedConfirmation) else LocalizedConfirmation.model_validate(parsed_confirmation)
-        elif confirmation_response.text:
-            confirmation = LocalizedConfirmation.model_validate_json(confirmation_response.text)
-        else:
-            raise ValueError("Gemini returned an empty confirmation")
-    except Exception:
-        succeeded = booking_result.get("status") == "success"
-        english_fallback = "Your booking is confirmed." if succeeded else "Booking could not be completed. Please try again."
-        telugu_fallback = "బుకింగ్ విజయవంతమైంది." if succeeded else "బుకింగ్ పూర్తి కాలేదు. మళ్లీ ప్రయత్నించండి."
-        localized_fallbacks = {
-            "en": english_fallback,
-            "te": telugu_fallback,
-            "hi": "आपकी बुकिंग सफल हुई।" if succeeded else "बुकिंग पूरी नहीं हो सकी। फिर से कोशिश करें।",
-            "ta": "முன்பதிவு வெற்றிகரமாக முடிந்தது." if succeeded else "முன்பதிவை முடிக்க முடியவில்லை. மீண்டும் முயற்சிக்கவும்.",
-            "ml": "ബുക്കിംഗ് വിജയകരമായി പൂർത്തിയായി." if succeeded else "ബുക്കിംഗ് പൂർത്തിയാക്കാനായില്ല. വീണ്ടും ശ്രമിക്കുക.",
-        }
-        confirmation = LocalizedConfirmation(
-            message_en=english_fallback,
-            message_te=telugu_fallback,
-            message_localized=localized_fallbacks[language],
-        )
-
-    confirmation_en = confirmation.message_en
-    confirmation_te = confirmation.message_te
+    confirmation = await asyncio.to_thread(generate_booking_confirmation, client, booking_result, intent, language)
 
     return {
         "intent": intent.model_dump(),
         "booking_result": booking_result,
         "booking_record": booking_record,
-        "confirmation_en": confirmation_en,
-        "confirmation_te": confirmation_te,
+        "confirmation_en": confirmation.message_en,
+        "confirmation_te": confirmation.message_te,
         "confirmation_localized": confirmation.message_localized,
     }
 
@@ -545,7 +556,7 @@ def verify_price(
     if not api_key:
         raise HTTPException(status_code=503, detail="GEMINI_API_KEY is not configured.")
 
-    language = normalize_language(language)
+    normalized_lang = normalize_language(language)
     prompt = (
         "Identify the exact fertilizer product and pack size from the supplied image/text. "
         "Use the provided Government of India MRP list as the primary reference. Only classify "
@@ -565,7 +576,7 @@ def verify_price(
         f"Official MRP data:\n{json.dumps(mrp_data, ensure_ascii=False)}\n\n"
         f"User's fertilizer description: {fertilizer_text or '(not provided)'}\n"
         f"User's quoted price in INR: {quoted_price if quoted_price is not None else 'not provided; use 0'}\n"
-        f"The localized explanation language is {LANGUAGE_NAMES[language]} ({language})."
+        f"The localized explanation language is {LANGUAGE_NAMES[normalized_lang]} ({normalized_lang})."
     )
 
     contents: list = [prompt]
@@ -577,7 +588,7 @@ def verify_price(
         contents.append(types.Part.from_bytes(data=image_bytes, mime_type=mime_type))
 
     try:
-        client = genai.Client(http_options={"api_version": "v1beta"})
+        client = genai.Client(api_key=api_key, http_options={"api_version": "v1beta"})
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=contents,
@@ -615,24 +626,26 @@ def read_complaints() -> list[dict]:
 
 @app.post("/file-complaint")
 def file_complaint(complaint: ComplaintRequest) -> dict:
-    records = read_complaints()
-    saved = {
-        "id": f"AGRI-TS-2026-{secrets.randbelow(10000):04d}",
-        **complaint.model_dump(),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    records.append(saved)
-    temporary_file = COMPLAINTS_FILE.with_suffix(".json.tmp")
-    try:
-        with temporary_file.open("w", encoding="utf-8") as complaints_file:
-            json.dump(records, complaints_file, ensure_ascii=False, indent=2)
-            complaints_file.write("\n")
-        temporary_file.replace(COMPLAINTS_FILE)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail="Could not save the complaint") from exc
-    return saved
+    with COMPLAINTS_LOCK:
+        records = read_complaints()
+        saved = {
+            "id": f"AGRI-IN-2026-{secrets.randbelow(10000):04d}",
+            **complaint.model_dump(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        records.append(saved)
+        temporary_file = COMPLAINTS_FILE.with_suffix(".json.tmp")
+        try:
+            with temporary_file.open("w", encoding="utf-8") as complaints_file:
+                json.dump(records, complaints_file, ensure_ascii=False, indent=2)
+                complaints_file.write("\n")
+            temporary_file.replace(COMPLAINTS_FILE)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="Could not save the complaint") from exc
+        return saved
 
 
 @app.get("/complaints")
 def get_complaints() -> list[dict]:
-    return read_complaints()
+    with COMPLAINTS_LOCK:
+        return read_complaints()
